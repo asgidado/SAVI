@@ -190,7 +190,8 @@ def test_csv_output_schema(tmp_path):
     expected_headers = [
         "timestamp", "frame_idx", "gaze_x_deg", "gaze_y_deg",
         "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
-        "velocity_deg_s", "blink", "confidence", "fps_actual"
+        "velocity_deg_s", "blink", "confidence", "fps_actual",
+        "cal_x_deg", "cal_y_deg"
     ]
     assert rows[0] == expected_headers
 

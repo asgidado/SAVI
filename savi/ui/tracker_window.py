@@ -11,7 +11,7 @@ import collections
 from PySide6.QtCore import QTimer, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFrame, QGridLayout
+    QFrame, QGridLayout, QApplication
 )
 from PySide6.QtGui import QImage, QPixmap, QFont
 import pyqtgraph
@@ -21,6 +21,8 @@ import numpy as np
 
 from savi.tracker import GazeTracker, GazeFrame
 from savi.ui.theme import COLORS, FONTS, RADIUS
+from savi.ui.calibration_window import CalibrationWindow
+from savi.calibration import CalibrationMap
 
 logger = logging.getLogger("savi.ui.tracker_window")
 
@@ -158,6 +160,7 @@ class TrackerWindow(QMainWindow):
         ]
 
         self.hud_labels = {}
+        self.hud_keys = {}
         for row, (label_text, key) in enumerate(hud_items):
             lbl_key = QLabel(label_text, self)
             lbl_key.setStyleSheet(f"color: {COLORS['text_secondary']}; font-weight: 500;")
@@ -168,6 +171,7 @@ class TrackerWindow(QMainWindow):
             self.grid_layout.addWidget(lbl_key, row, 0)
             self.grid_layout.addWidget(lbl_val, row, 1)
             self.hud_labels[key] = lbl_val
+            self.hud_keys[key] = lbl_key
 
         self.hud_layout.addWidget(self.grid_widget)
         self.hud_layout.addStretch()
@@ -220,6 +224,9 @@ class TrackerWindow(QMainWindow):
         self.buttons_layout.setContentsMargins(0, 4, 0, 0)
         self.buttons_layout.setSpacing(12)
 
+        self.btn_calibrate = QPushButton("Calibrate", self)
+        self.btn_calibrate.clicked.connect(self._run_calibration)
+
         self.btn_log = QPushButton("Start logging CSV", self)
         self.btn_log.clicked.connect(self._toggle_csv_logging)
         
@@ -229,6 +236,7 @@ class TrackerWindow(QMainWindow):
         self.btn_quit = QPushButton("Quit", self)
         self.btn_quit.clicked.connect(self.close)
         
+        self.buttons_layout.addWidget(self.btn_calibrate)
         self.buttons_layout.addWidget(self.btn_log)
         self.buttons_layout.addWidget(self.btn_jitter)
         self.buttons_layout.addStretch()
@@ -285,8 +293,9 @@ class TrackerWindow(QMainWindow):
                 self.latest_frame = annotated
                 self.latest_gaze_frame = gaze_frame
                 
-                # Append to scrolling chart history
-                self.trace_history.append((gaze_frame.timestamp, gaze_frame.gaze_x_deg))
+                # Append to scrolling chart history (use calibrated gaze if loaded)
+                gaze_x = gaze_frame.cal_x_deg if (gaze_frame.calibration_applied and gaze_frame.cal_x_deg is not None) else gaze_frame.gaze_x_deg
+                self.trace_history.append((gaze_frame.timestamp, gaze_x))
                 drained_any = True
             except queue.Empty:
                 break
@@ -321,10 +330,30 @@ class TrackerWindow(QMainWindow):
         base_style = f"font-family: {mono_font_family}; font-size: 14px; font-weight: bold;"
 
         # X, Y coordinates
-        self.hud_labels["gaze_x"].setText(f"{f.gaze_x_deg:+.1f}°")
-        self.hud_labels["gaze_x"].setStyleSheet(f"{base_style} color: {COLORS['text_primary']};")
-        self.hud_labels["gaze_y"].setText(f"{f.gaze_y_deg:+.1f}°")
-        self.hud_labels["gaze_y"].setStyleSheet(f"{base_style} color: {COLORS['text_primary']};")
+        if f.calibration_applied and f.cal_x_deg is not None and f.cal_y_deg is not None:
+            self.hud_keys["gaze_x"].setText("Gaze X (cal)")
+            self.hud_keys["gaze_x"].setStyleSheet(f"color: {COLORS['accent']}; font-weight: bold;")
+            self.hud_labels["gaze_x"].setText(
+                f"<html>{f.cal_x_deg:+.1f}° <span style='font-size: 11px; color: {COLORS['text_muted']}; font-weight: normal;'>({f.gaze_x_deg:+.1f}°)</span></html>"
+            )
+            self.hud_labels["gaze_x"].setStyleSheet(f"{base_style} color: {COLORS['accent']};")
+
+            self.hud_keys["gaze_y"].setText("Gaze Y (cal)")
+            self.hud_keys["gaze_y"].setStyleSheet(f"color: {COLORS['accent']}; font-weight: bold;")
+            self.hud_labels["gaze_y"].setText(
+                f"<html>{f.cal_y_deg:+.1f}° <span style='font-size: 11px; color: {COLORS['text_muted']}; font-weight: normal;'>({f.gaze_y_deg:+.1f}°)</span></html>"
+            )
+            self.hud_labels["gaze_y"].setStyleSheet(f"{base_style} color: {COLORS['accent']};")
+        else:
+            self.hud_keys["gaze_x"].setText("Gaze X")
+            self.hud_keys["gaze_x"].setStyleSheet(f"color: {COLORS['text_secondary']}; font-weight: 500;")
+            self.hud_labels["gaze_x"].setText(f"{f.gaze_x_deg:+.1f}°")
+            self.hud_labels["gaze_x"].setStyleSheet(f"{base_style} color: {COLORS['text_primary']};")
+
+            self.hud_keys["gaze_y"].setText("Gaze Y")
+            self.hud_keys["gaze_y"].setStyleSheet(f"color: {COLORS['text_secondary']}; font-weight: 500;")
+            self.hud_labels["gaze_y"].setText(f"{f.gaze_y_deg:+.1f}°")
+            self.hud_labels["gaze_y"].setStyleSheet(f"{base_style} color: {COLORS['text_primary']};")
 
         # L / R Iris status
         l_status = "LOST" if (f.left_iris_x == 0.0 and f.left_iris_y == 0.0) or f.blink else "OK"
@@ -434,6 +463,22 @@ class TrackerWindow(QMainWindow):
             logger.info(f"Jitter test completed. Result: {rms:.2f}px")
         else:
             logger.error("Jitter test failed.")
+
+    def _run_calibration(self):
+        """Launches the full-screen calibration screen."""
+        self.cal_win = CalibrationWindow(self.tracker, None)
+        self.cal_win.calibration_complete.connect(self._on_calibration_complete)
+        
+        # Position and size to cover the screen instantly without native macOS fullscreen animation
+        screen = QApplication.primaryScreen()
+        if screen:
+            self.cal_win.setGeometry(screen.geometry())
+        self.cal_win.show()
+
+    def _on_calibration_complete(self, cal_map: CalibrationMap):
+        """Callback when the calibration succeeds."""
+        self.tracker.load_calibration(cal_map)
+        logger.info("New calibration map successfully loaded into tracker.")
 
     def closeEvent(self, event):
         """Ensures that the tracker background thread shuts down when closing."""

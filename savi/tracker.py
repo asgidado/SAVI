@@ -38,6 +38,9 @@ class GazeFrame:
     blink: bool               # True if blink detected this frame
     confidence: float         # 0.0–1.0, face detection confidence
     fps_actual: float         # measured fps (rolling 30-frame window)
+    cal_x_deg: float | None = None   # calibrated horizontal gaze, degrees
+    cal_y_deg: float | None = None   # calibrated vertical gaze, degrees
+    calibration_applied: bool = False
 
 
 class GazeCSVLogger:
@@ -59,7 +62,8 @@ class GazeCSVLogger:
         self.writer.writerow([
             "timestamp", "frame_idx", "gaze_x_deg", "gaze_y_deg",
             "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
-            "velocity_deg_s", "blink", "confidence", "fps_actual"
+            "velocity_deg_s", "blink", "confidence", "fps_actual",
+            "cal_x_deg", "cal_y_deg"
         ])
         return self.file_path
 
@@ -77,7 +81,9 @@ class GazeCSVLogger:
                 frame.velocity_deg_s,
                 int(frame.blink),
                 frame.confidence,
-                frame.fps_actual
+                frame.fps_actual,
+                "" if frame.cal_x_deg is None else frame.cal_x_deg,
+                "" if frame.cal_y_deg is None else frame.cal_y_deg
             ])
             self.file.flush()
 
@@ -99,6 +105,8 @@ class GazeTracker:
         self.model_path = model_path
         self.running = False
         self.queue = queue.Queue()
+        self.queues = [self.queue]
+        self._calibration = None
         
         # Logging & CSV
         self.csv_logger = GazeCSVLogger()
@@ -120,6 +128,23 @@ class GazeTracker:
         self.cap = None
         self.landmarker = None
         self.thread = None
+
+    def load_calibration(self, cal_map):
+        self._calibration = cal_map
+
+    def _apply_calibration_if_loaded(self, raw_x_px, raw_y_px):
+        if self._calibration is None:
+            return None, None
+        from savi.calibration import apply_calibration
+        return apply_calibration(raw_x_px, raw_y_px, self._calibration)
+
+    def register_queue(self, q):
+        if q not in self.queues:
+            self.queues.append(q)
+
+    def unregister_queue(self, q):
+        if q in self.queues:
+            self.queues.remove(q)
 
     def open_camera(self) -> bool:
         """Opens and configures the camera on the main thread (macOS requirement)."""
@@ -322,6 +347,8 @@ class GazeTracker:
         left_iris_y = 0.0
         right_iris_x = 0.0
         right_iris_y = 0.0
+        cal_x = None
+        cal_y = None
 
         if result.face_landmarks:
             confidence = getattr(self, "mock_confidence", None)
@@ -366,6 +393,14 @@ class GazeTracker:
                 left_blink = self._check_eye_blink(left_area, self._left_area_history)
                 right_blink = self._check_eye_blink(right_area, self._right_area_history)
                 blink = left_blink or right_blink
+
+                # Apply calibration if map loaded and NOT blinking
+                if not blink:
+                    mean_iris_x_px = (left_iris_x + right_iris_x) / 2.0
+                    mean_iris_y_px = (left_iris_y + right_iris_y) / 2.0
+                    cal_x, cal_y = self._apply_calibration_if_loaded(mean_iris_x_px, mean_iris_y_px)
+                else:
+                    cal_x, cal_y = None, None
             else:
                 confidence = 0.0
                 blink = True
@@ -398,7 +433,10 @@ class GazeTracker:
             velocity_deg_s=velocity_deg_s,
             blink=blink,
             confidence=confidence,
-            fps_actual=fps_actual
+            fps_actual=fps_actual,
+            cal_x_deg=cal_x,
+            cal_y_deg=cal_y,
+            calibration_applied=cal_x is not None
         )
 
         self._rolling_history.append(gaze_frame)
@@ -409,8 +447,9 @@ class GazeTracker:
         # Draw OpenCV overlay
         annotated_frame = self._draw_annotations(frame, gaze_frame)
 
-        # Emit to Queue
-        self.queue.put((annotated_frame, gaze_frame))
+        # Emit to all registered queues
+        for q in list(self.queues):
+            q.put((annotated_frame, gaze_frame))
 
     def _calculate_eye_area(self, landmarks, boundary_indices: list[int], w: float, h: float) -> float:
         """Computes approximate area of the iris polygon."""
