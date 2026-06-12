@@ -73,13 +73,16 @@ class CalibrationWindow(QWidget):
         
         self.current_point_idx = 0
         self.current_point_samples = []
+        self.current_point_anchor_samples = []  # [(la_x, la_y, ra_x, ra_y), ...]
         self.sample_points_px = []
+        self.socket_anchor_points = []          # one entry per calibration point
         self.low_quality_targets = []
         self.target_positions_deg = []
         
         self.poly_coeffs_x = []
         self.poly_coeffs_y = []
         self.validation_samples = []
+        self.validation_anchor_samples = []
         self.validation_error = 0.0
         self.cal_map = None
         self.point_start_time = 0.0
@@ -186,7 +189,9 @@ class CalibrationWindow(QWidget):
         self.state = "CALIBRATING"
         self.current_point_idx = 0
         self.current_point_samples = []
+        self.current_point_anchor_samples = []
         self.sample_points_px = []
+        self.socket_anchor_points = []
         self.low_quality_targets = []
         self.results_container.hide()
         
@@ -225,6 +230,13 @@ class CalibrationWindow(QWidget):
                             mean_x = (gaze_frame.left_iris_x + gaze_frame.right_iris_x) / 2.0
                             mean_y = (gaze_frame.left_iris_y + gaze_frame.right_iris_y) / 2.0
                             self.current_point_samples.append((mean_x, mean_y))
+                            
+                            # Also collect socket anchor positions
+                            la_x = (gaze_frame.left_eye_inner_x + gaze_frame.left_eye_outer_x) / 2.0
+                            la_y = (gaze_frame.left_eye_inner_y + gaze_frame.left_eye_outer_y) / 2.0
+                            ra_x = (gaze_frame.right_eye_inner_x + gaze_frame.right_eye_outer_x) / 2.0
+                            ra_y = (gaze_frame.right_eye_inner_y + gaze_frame.right_eye_outer_y) / 2.0
+                            self.current_point_anchor_samples.append((la_x, la_y, ra_x, ra_y))
                 except queue.Empty:
                     break
 
@@ -237,6 +249,18 @@ class CalibrationWindow(QWidget):
                     )
                 else:
                     mean_px = (self.width() / 2.0, self.height() / 2.0) # default fallback
+                
+                if self.current_point_anchor_samples:
+                    mean_la_x = sum(s[0] for s in self.current_point_anchor_samples) / len(self.current_point_anchor_samples)
+                    mean_la_y = sum(s[1] for s in self.current_point_anchor_samples) / len(self.current_point_anchor_samples)
+                    mean_ra_x = sum(s[2] for s in self.current_point_anchor_samples) / len(self.current_point_anchor_samples)
+                    mean_ra_y = sum(s[3] for s in self.current_point_anchor_samples) / len(self.current_point_anchor_samples)
+                    self.socket_anchor_points.append((mean_la_x, mean_la_y, mean_ra_x, mean_ra_y))
+                else:
+                    # Fallback if no anchor samples collected
+                    self.socket_anchor_points.append((0.0, 0.0, 0.0, 0.0))
+                
+                self.current_point_anchor_samples = []
                 
                 if len(self.current_point_samples) < 10:
                     self.low_quality_targets.append(self.current_point_idx)
@@ -254,11 +278,13 @@ class CalibrationWindow(QWidget):
                     self.state = "VALIDATING"
                     self.validation_start_time = time.perf_counter()
                     self.validation_samples = []
+                    self.validation_anchor_samples = []
                     
-                    # Fit polynomial to get initial coeffs
+                    # Fit polynomial to get initial coeffs using socket anchors
                     try:
                         self.poly_coeffs_x, self.poly_coeffs_y = fit_polynomial(
-                            self.sample_points_px, self.target_positions_deg
+                            self.sample_points_px, self.target_positions_deg,
+                            socket_anchor_points=self.socket_anchor_points
                         )
                     except Exception as e:
                         logger.error(f"Error fitting polynomial: {e}")
@@ -280,6 +306,13 @@ class CalibrationWindow(QWidget):
                             mean_x = (gaze_frame.left_iris_x + gaze_frame.right_iris_x) / 2.0
                             mean_y = (gaze_frame.left_iris_y + gaze_frame.right_iris_y) / 2.0
                             self.validation_samples.append((mean_x, mean_y))
+                            
+                            # Also collect validation socket anchor positions
+                            la_x = (gaze_frame.left_eye_inner_x + gaze_frame.left_eye_outer_x) / 2.0
+                            la_y = (gaze_frame.left_eye_inner_y + gaze_frame.left_eye_outer_y) / 2.0
+                            ra_x = (gaze_frame.right_eye_inner_x + gaze_frame.right_eye_outer_x) / 2.0
+                            ra_y = (gaze_frame.right_eye_inner_y + gaze_frame.right_eye_outer_y) / 2.0
+                            self.validation_anchor_samples.append((la_x, la_y, ra_x, ra_y))
                 except queue.Empty:
                     break
 
@@ -314,12 +347,21 @@ class CalibrationWindow(QWidget):
             fps=30.0,
             created_at=created_at_iso,
             session_id=session_id,
-            low_quality_targets=self.low_quality_targets
+            low_quality_targets=self.low_quality_targets,
+            socket_anchor_points=self.socket_anchor_points
         )
 
         errors = []
-        for px_x, px_y in self.validation_samples:
-            cal_x, cal_y = apply_calibration(px_x, px_y, self.cal_map)
+        for i, (px_x, px_y) in enumerate(self.validation_samples):
+            if i < len(self.validation_anchor_samples):
+                la_x, la_y, ra_x, ra_y = self.validation_anchor_samples[i]
+                anchor_x = (la_x + ra_x) / 2.0
+                anchor_y = (la_y + ra_y) / 2.0
+                socket_anchor = (anchor_x, anchor_y)
+            else:
+                socket_anchor = None
+            cal_x, cal_y = apply_calibration(px_x, px_y, self.cal_map,
+                                              current_socket_anchor=socket_anchor)
             err = math.sqrt((cal_x - val_target_x_deg)**2 + (cal_y - val_target_y_deg)**2)
             errors.append(err)
 

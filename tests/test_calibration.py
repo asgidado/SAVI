@@ -145,3 +145,67 @@ def test_screen_fraction_to_deg_center_is_zero():
     brx, bry = screen_fraction_to_deg(0.9, 0.9, w, h, px_per_cm, viewing_dist)
     assert brx > 0.0
     assert bry > 0.0
+
+
+# 5. test_iris_to_socket_coords: confirm subtraction of midpoint anchors
+def test_iris_to_socket_coords():
+    from savi.calibration import iris_to_socket_coords
+    # Iris at (320, 240), inner corner at (290, 240), outer corner at (350, 240)
+    # Anchor = (320, 240). Relative = (0.0, 0.0)
+    rel_x, rel_y = iris_to_socket_coords(320, 240, 290, 240, 350, 240)
+    assert math.isclose(rel_x, 0.0, abs_tol=1e-5)
+    assert math.isclose(rel_y, 0.0, abs_tol=1e-5)
+
+    # Iris shifted right by 5px: iris at (325, 240)
+    # Anchor still (320, 240). Relative = (5.0, 0.0)
+    rel_x, rel_y = iris_to_socket_coords(325, 240, 290, 240, 350, 240)
+    assert math.isclose(rel_x, 5.0, abs_tol=1e-5)
+    assert math.isclose(rel_y, 0.0, abs_tol=1e-5)
+
+
+# 6. test_fit_polynomial_with_socket_anchors: fit with constant anchor and check recovery
+def test_fit_polynomial_with_socket_anchors():
+    xs_px = [100.0, 320.0, 600.0]
+    ys_px = [80.0, 240.0, 400.0]
+    
+    sample_points_px = []
+    target_positions_deg = []
+    for x_px in xs_px:
+        for y_px in ys_px:
+            sample_points_px.append((x_px, y_px))
+            x_deg = 0.1 * x_px - 5.0
+            y_deg = 0.2 * y_px + 2.0
+            target_positions_deg.append((x_deg, y_deg))
+            
+    socket_anchor_points = [
+        (280.0, 240.0, 320.0, 240.0)  # anchor = (300, 240) for all 9 points
+        for _ in range(9)
+    ]
+    
+    coeffs_x, coeffs_y = fit_polynomial(
+        sample_points_px, target_positions_deg,
+        socket_anchor_points=socket_anchor_points
+    )
+    
+    cal_map = CalibrationMap(
+        target_positions_deg=target_positions_deg,
+        sample_points_px=sample_points_px,
+        poly_coeffs_x=coeffs_x,
+        poly_coeffs_y=coeffs_y,
+        validation_error_deg=0.0,
+        validation_passed=True,
+        screen_width_px=640,
+        screen_height_px=480,
+        viewing_distance_cm=57.0,
+        fps=30.0,
+        created_at="2026-06-10T12:00:00Z",
+        session_id="test_session",
+        socket_anchor_points=socket_anchor_points
+    )
+    
+    cal_x, cal_y = apply_calibration(
+        200.0, 150.0, cal_map,
+        current_socket_anchor=(300.0, 240.0)
+    )
+    assert math.isclose(cal_x, 15.0, abs_tol=0.5)
+    assert math.isclose(cal_y, 32.0, abs_tol=0.5)

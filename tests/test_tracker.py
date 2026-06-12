@@ -191,7 +191,11 @@ def test_csv_output_schema(tmp_path):
         "timestamp", "frame_idx", "gaze_x_deg", "gaze_y_deg",
         "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
         "velocity_deg_s", "blink", "confidence", "fps_actual",
-        "cal_x_deg", "cal_y_deg"
+        "cal_x_deg", "cal_y_deg",
+        "left_eye_inner_x", "left_eye_inner_y",
+        "left_eye_outer_x", "left_eye_outer_y",
+        "right_eye_inner_x", "right_eye_inner_y",
+        "right_eye_outer_x", "right_eye_outer_y"
     ]
     assert rows[0] == expected_headers
 

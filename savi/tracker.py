@@ -42,6 +42,17 @@ class GazeFrame:
     cal_y_deg: float | None = None   # calibrated vertical gaze, degrees
     calibration_applied: bool = False
 
+    # Eye socket anchor landmarks (pixel coordinates)
+    left_eye_inner_x: float = 0.0    # landmark 133
+    left_eye_inner_y: float = 0.0
+    left_eye_outer_x: float = 0.0    # landmark 33
+    left_eye_outer_y: float = 0.0
+    right_eye_inner_x: float = 0.0   # landmark 362
+    right_eye_inner_y: float = 0.0
+    right_eye_outer_x: float = 0.0   # landmark 263
+    right_eye_outer_y: float = 0.0
+
+
 
 class GazeCSVLogger:
     """
@@ -63,7 +74,11 @@ class GazeCSVLogger:
             "timestamp", "frame_idx", "gaze_x_deg", "gaze_y_deg",
             "left_iris_x", "left_iris_y", "right_iris_x", "right_iris_y",
             "velocity_deg_s", "blink", "confidence", "fps_actual",
-            "cal_x_deg", "cal_y_deg"
+            "cal_x_deg", "cal_y_deg",
+            "left_eye_inner_x", "left_eye_inner_y",
+            "left_eye_outer_x", "left_eye_outer_y",
+            "right_eye_inner_x", "right_eye_inner_y",
+            "right_eye_outer_x", "right_eye_outer_y"
         ])
         return self.file_path
 
@@ -83,7 +98,15 @@ class GazeCSVLogger:
                 frame.confidence,
                 frame.fps_actual,
                 "" if frame.cal_x_deg is None else frame.cal_x_deg,
-                "" if frame.cal_y_deg is None else frame.cal_y_deg
+                "" if frame.cal_y_deg is None else frame.cal_y_deg,
+                "" if frame.blink else frame.left_eye_inner_x,
+                "" if frame.blink else frame.left_eye_inner_y,
+                "" if frame.blink else frame.left_eye_outer_x,
+                "" if frame.blink else frame.left_eye_outer_y,
+                "" if frame.blink else frame.right_eye_inner_x,
+                "" if frame.blink else frame.right_eye_inner_y,
+                "" if frame.blink else frame.right_eye_outer_x,
+                "" if frame.blink else frame.right_eye_outer_y
             ])
             self.file.flush()
 
@@ -132,11 +155,11 @@ class GazeTracker:
     def load_calibration(self, cal_map):
         self._calibration = cal_map
 
-    def _apply_calibration_if_loaded(self, raw_x_px, raw_y_px):
+    def _apply_calibration_if_loaded(self, raw_x_px, raw_y_px, socket_anchor=None):
         if self._calibration is None:
             return None, None
         from savi.calibration import apply_calibration
-        return apply_calibration(raw_x_px, raw_y_px, self._calibration)
+        return apply_calibration(raw_x_px, raw_y_px, self._calibration, current_socket_anchor=socket_anchor)
 
     def register_queue(self, q):
         if q not in self.queues:
@@ -350,6 +373,15 @@ class GazeTracker:
         cal_x = None
         cal_y = None
 
+        left_eye_inner_x = 0.0
+        left_eye_inner_y = 0.0
+        left_eye_outer_x = 0.0
+        left_eye_outer_y = 0.0
+        right_eye_inner_x = 0.0
+        right_eye_inner_y = 0.0
+        right_eye_outer_x = 0.0
+        right_eye_outer_y = 0.0
+
         if result.face_landmarks:
             confidence = getattr(self, "mock_confidence", None)
             if confidence is None:
@@ -367,6 +399,26 @@ class GazeTracker:
                 r_ctr = landmarks[473]
                 right_iris_x = r_ctr.x * w
                 right_iris_y = r_ctr.y * h
+
+                # Eye socket anchors for iris-in-socket calibration (ADR-0001)
+                L_INNER = 133   # left eye inner corner
+                L_OUTER = 33    # left eye outer corner
+                R_INNER = 362   # right eye inner corner
+                R_OUTER = 263   # right eye outer corner
+
+                l_inner = landmarks[L_INNER]
+                l_outer = landmarks[L_OUTER]
+                r_inner = landmarks[R_INNER]
+                r_outer = landmarks[R_OUTER]
+
+                left_eye_inner_x  = l_inner.x * w
+                left_eye_inner_y  = l_inner.y * h
+                left_eye_outer_x  = l_outer.x * w
+                left_eye_outer_y  = l_outer.y * h
+                right_eye_inner_x = r_inner.x * w
+                right_eye_inner_y = r_inner.y * h
+                right_eye_outer_x = r_outer.x * w
+                right_eye_outer_y = r_outer.y * h
 
                 # Conversion Parameters
                 pixels_per_cm = 37.8
@@ -398,7 +450,18 @@ class GazeTracker:
                 if not blink:
                     mean_iris_x_px = (left_iris_x + right_iris_x) / 2.0
                     mean_iris_y_px = (left_iris_y + right_iris_y) / 2.0
-                    cal_x, cal_y = self._apply_calibration_if_loaded(mean_iris_x_px, mean_iris_y_px)
+
+                    # Compute socket anchor for head-pose tolerant calibration
+                    la_x = (left_eye_inner_x + left_eye_outer_x) / 2.0
+                    la_y = (left_eye_inner_y + left_eye_outer_y) / 2.0
+                    ra_x = (right_eye_inner_x + right_eye_outer_x) / 2.0
+                    ra_y = (right_eye_inner_y + right_eye_outer_y) / 2.0
+                    socket_anchor = ((la_x + ra_x) / 2.0, (la_y + ra_y) / 2.0)
+
+                    cal_x, cal_y = self._apply_calibration_if_loaded(
+                        mean_iris_x_px, mean_iris_y_px,
+                        socket_anchor=socket_anchor
+                    )
                 else:
                     cal_x, cal_y = None, None
             else:
@@ -426,17 +489,25 @@ class GazeTracker:
             frame_idx=self.frame_idx,
             gaze_x_deg=gaze_x_deg,
             gaze_y_deg=gaze_y_deg,
-            left_iris_x=left_iris_x,
-            left_iris_y=left_iris_y,
-            right_iris_x=right_iris_x,
-            right_iris_y=right_iris_y,
+            left_iris_x=0.0 if (blink or confidence == 0.0) else left_iris_x,
+            left_iris_y=0.0 if (blink or confidence == 0.0) else left_iris_y,
+            right_iris_x=0.0 if (blink or confidence == 0.0) else right_iris_x,
+            right_iris_y=0.0 if (blink or confidence == 0.0) else right_iris_y,
             velocity_deg_s=velocity_deg_s,
             blink=blink,
             confidence=confidence,
             fps_actual=fps_actual,
             cal_x_deg=cal_x,
             cal_y_deg=cal_y,
-            calibration_applied=cal_x is not None
+            calibration_applied=cal_x is not None,
+            left_eye_inner_x=0.0 if (blink or confidence == 0.0) else left_eye_inner_x,
+            left_eye_inner_y=0.0 if (blink or confidence == 0.0) else left_eye_inner_y,
+            left_eye_outer_x=0.0 if (blink or confidence == 0.0) else left_eye_outer_x,
+            left_eye_outer_y=0.0 if (blink or confidence == 0.0) else left_eye_outer_y,
+            right_eye_inner_x=0.0 if (blink or confidence == 0.0) else right_eye_inner_x,
+            right_eye_inner_y=0.0 if (blink or confidence == 0.0) else right_eye_inner_y,
+            right_eye_outer_x=0.0 if (blink or confidence == 0.0) else right_eye_outer_x,
+            right_eye_outer_y=0.0 if (blink or confidence == 0.0) else right_eye_outer_y
         )
 
         self._rolling_history.append(gaze_frame)
