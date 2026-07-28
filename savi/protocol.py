@@ -174,6 +174,7 @@ class TrialEngine:
 
         self._preprocessor = Preprocessor()
         self._complete = False
+        self._on_target_onset = None
 
     def start(self):
         """Call once before pushing any frames."""
@@ -184,6 +185,38 @@ class TrialEngine:
             f"{self.spec.block_type.value} "
             f"{self.spec.target_direction} {self.spec.target_amplitude_deg}°"
         )
+
+    def set_onset_callback(self, cb) -> None:
+        """
+        Register a callback to be invoked at the moment the UI
+        is about to render the target stimulus.
+
+        The callback signature: cb() → None
+        The UI's paintEvent() calls set_target_onset(time.perf_counter())
+        immediately after this callback fires.
+
+        This is the only way t_target_onset is set precisely.
+        The headless fallback (time.perf_counter() at state transition)
+        is overwritten by the UI layer via set_target_onset().
+
+        Source: savi_clinical_protocol_spec.md — CRITICAL TIMING ACTION
+        "Record IMMEDIATELY inside the paintEvent() that renders the target dot."
+        """
+        self._on_target_onset = cb
+
+    def set_target_onset(self, t: float) -> None:
+        """
+        Overwrite t_target_onset with the timestamp recorded inside
+        paintEvent() — the closest measurable approximation to actual
+        photon emission.
+
+        Called by StimulusWindow.paintEvent() only.
+        Never called from QTimer callbacks.
+
+        At 30fps this eliminates up to 33ms of render-pipeline latency
+        from the headless approximation.
+        """
+        self.t_target_onset = t
 
     def push_frame(self, frame) -> "TrialLog | None":
         """
@@ -274,6 +307,8 @@ class TrialEngine:
             else:
                 # Overlap or Antisaccade: go directly to target
                 self.t_target_onset = now
+                if self._on_target_onset:
+                    self._on_target_onset()
                 self.state = TrialState.TARGET_ON
                 logger.debug(f"Trial {self.spec.trial_number}: entering TARGET_ON")
 
@@ -288,6 +323,8 @@ class TrialEngine:
         elapsed_ms = (now - self.t_gap_start) * 1000.0
         if elapsed_ms >= self.spec.gap_duration_ms:
             self.t_target_onset = now
+            if self._on_target_onset:
+                self._on_target_onset()
             self.state = TrialState.TARGET_ON
             logger.debug(f"Trial {self.spec.trial_number}: gap complete, TARGET_ON")
         return None

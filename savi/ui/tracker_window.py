@@ -66,6 +66,7 @@ class TrackerWindow(QMainWindow):
         
         # Scrolling trace history: elements are (timestamp, gaze_x_deg)
         self.trace_history = collections.deque()
+        self._loaded_cal_map = None
 
         # Build UI
         self._init_ui()
@@ -239,6 +240,12 @@ class TrackerWindow(QMainWindow):
         self.buttons_layout.addWidget(self.btn_calibrate)
         self.buttons_layout.addWidget(self.btn_log)
         self.buttons_layout.addWidget(self.btn_jitter)
+        
+        self.btn_battery = QPushButton("Run Battery", self)
+        self.btn_battery.clicked.connect(self._run_battery)
+        self.btn_battery.setEnabled(False)   # disabled until calibration loaded
+        self.buttons_layout.insertWidget(2, self.btn_battery)
+        
         self.buttons_layout.addStretch()
         self.buttons_layout.addWidget(self.btn_quit)
         
@@ -478,7 +485,33 @@ class TrackerWindow(QMainWindow):
     def _on_calibration_complete(self, cal_map: CalibrationMap):
         """Callback when the calibration succeeds."""
         self.tracker.load_calibration(cal_map)
-        logger.info("New calibration map successfully loaded into tracker.")
+        self._loaded_cal_map = cal_map
+        self.btn_battery.setEnabled(True)   # enable now that cal is loaded
+        logger.info("Calibration loaded — Run Battery now available.")
+
+    def _run_battery(self):
+        """Launch the full-screen stimulus window."""
+        if self._loaded_cal_map is None:
+            logger.warning("Cannot run battery — no calibration loaded.")
+            return
+
+        from savi.ui.stimulus_window import StimulusWindow
+        self._stimulus_win = StimulusWindow(self.tracker, self._loaded_cal_map)
+        self._stimulus_win.battery_complete.connect(self._on_battery_complete)
+        screen = QApplication.primaryScreen()
+        if screen:
+            self._stimulus_win.setGeometry(screen.geometry())
+        self._stimulus_win.show()
+
+    def _on_battery_complete(self, block_results: list):
+        logger.info(
+            f"Battery complete. "
+            f"Blocks: {len(block_results)} | "
+            f"Total usable trials: "
+            f"{sum(r.n_usable for r in block_results)}"
+        )
+        # block_results stored for v0.2.0 metric extraction
+        self._last_battery_results = block_results
 
     def closeEvent(self, event):
         """Ensures that the tracker background thread shuts down when closing."""
