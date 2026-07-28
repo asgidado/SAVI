@@ -1,8 +1,8 @@
-# SAVI — Saccadic Assessment Via Imaging (v0.1.0)
+# SAVI — Saccadic Assessment Via Imaging (v0.2.0)
 
 **Webcam-based Neurological Screening & Calibration System**
 
-SAVI is a webcam-based eye tracking application designed for neurological screening. Version 0.1.0 introduces a headless clinical protocol engine (state machine, block runner, session runner) that automates standard clinical saccade batteries (Overlap, Gap, Antisaccade trials) using synthetic or real-time GazeFrame streams.
+SAVI is a webcam-based eye tracking application designed for neurological screening. Version 0.2.0 introduces clinical metric extraction (`analyzer.py`), age-matched normative deviation scoring (`risk_engine.py`), JSON session persistence (`session_store.py`), and high-precision UI timing (`stimulus_window.py`).
 
 ---
 
@@ -35,19 +35,41 @@ python main.py
 ```
 
 ### 5. Run Unit Tests
-To verify all calculations, calibration solvers, preprocessors, saccade detectors, and protocol state machines:
+To verify all calculations, calibration solvers, preprocessors, saccade detectors, protocol state machines, metric extraction formulas, risk engines, and session persistence:
 ```bash
 pytest tests/ -v
 ```
 
 ---
 
-## Headless Clinical Protocol Engine (v0.1.0)
+## Metric Extraction & Normative Deviation Engine (v0.2.0)
+- **Clinical Metric Extraction (`Analyzer`)**:
+  - Extracts aggregate statistics per paradigm condition (`overlap`, `gap`, `antisaccade`): latency mean/sd/median, peak velocity mean/sd, gain mean/sd, MSP rate, and antisaccade error rates.
+  - **Saccade Gain**: Formula 9 calculation ($A_{\text{actual}} / A_{\text{target}}$).
+  - **Multiple Step Pattern (MSP)**: Formula 13 multi-peak velocity detection via `scipy.signal.find_peaks`.
+  - **Antisaccade Error Rate**: Formula 11 direction calculation against target direction.
+  - **Gap Effect**: Formula 14 difference between overlap and gap mean latencies.
+  - **Main Sequence Exponential Model**: Formula 10 curve fitting ($v_{\text{max}} \cdot (1 - e^{-A / A_0})$) across all pooled valid saccades via `scipy.optimize.curve_fit`.
+  - **Age Safety**: Explicit `participant_age` required on all calls (raises `ValueError` if missing; no default).
+- **Normative Deviation Engine (`RiskEngine`)**:
+  - Peer-reviewed normative reference database with inline paper citations (Imaoka et al. 2020, Hopf et al. 2018, Fischer et al. 1997).
+  - Evaluates z-score deviation and metric directionality (`high_is_bad` vs `low_is_bad`).
+  - Hard override for `antisaccade_error_rate` > 2x normative mean.
+  - Nearest-band fallback for out-of-range participant ages (`normative_match_exact = False`).
+  - Composite risk band classification (`Within Normal Limits`, `Borderline`, `Elevated`).
+- **JSON Session Persistence (`session_store.py`)**:
+  - Complete JSON persistence routines for `SessionMetrics` and `RiskProfile`.
+
+---
+
+## Headless Clinical Protocol Engine & High-Precision UI (v0.1.0 & v0.1.0-ui)
 - **Headless State Machine (`TrialEngine`)**:
   - Implements the standard clinical visual trial timeline: `FIXATION_CHECK` → `FIXATION_HOLD` → `GAP_BLANK` (Gap trials only) → `TARGET_ON` → `POST_TARGET` → `ITI` → `COMPLETE`.
   - Driven entirely by pushing `GazeFrame` objects, computing state durations dynamically using `time.perf_counter()` without background threads or timers.
   - Central fixation window validation: checks calibrated gaze coordinates against a $\pm 2.5^\circ$ window.
   - Automatically invokes the `Preprocessor` and `detector` at the end of each trial to extract usability metrics, latency, amplitude, and saccadic correctness.
+- **High-Precision Stimulus Presenter (`StimulusWindow`)**:
+  - Custom PySide6 stimulus window providing sub-millisecond `paintEvent()` timestamping for `t_target_onset`.
 - **Block-Level Execution (`BlockRunner`)**:
   - Automatically runs a single block type (`OVERLAP`, `GAP`, or `ANTISACCADE`) with randomized trial specifications.
   - Direction assignment balances left/right trials while shuffling pairs to guarantee no more than 3 consecutive trials occur in the same direction.
@@ -60,7 +82,7 @@ pytest tests/ -v
 ## Signal Preprocessing & Saccade Detection (v0.0.3)
 - **Blink Masking and Dilation**: Combines raw blink flags with low confidence detections (< 0.5) to build a blink mask, dilated by 2 frames to eliminate blink boundary artifacts.
 - **Blink Interpolation**: Linearly interpolates gaze coordinates during brief blinks (< 200ms) to preserve signal continuity, applying edge-filling when blink events occur at trial boundaries.
-- **Savitzky-Golay Smoothing**: Filters high-frequency noise using a fixed Savitzay-Golay filter (`window_length=5`, `polyorder=2`) tailored for the 30fps sampling rate.
+- **Savitzky-Golay Smoothing**: Filters high-frequency noise using a fixed Savitzky-Golay filter (`window_length=5`, `polyorder=2`) tailored for the 30fps sampling rate.
 - **Velocity Estimation**: Computes signed horizontal and vertical velocities using a central difference method (`np.gradient()`).
 - **Anatomical Velocity Clamp**: Automatically clamps physiologically impossible velocities (> 1000°/s) to 0.0 to prevent artifacts from being registered as saccades.
 - **I-VT Saccade Detection**: Performs asymmetric velocity-threshold identification within a 600ms post-stimulus window:
@@ -82,7 +104,6 @@ pytest tests/ -v
   - **macOS Space-Bypass**: Instantly loads the view by adjusting geometry bounds rather than triggering slow native space transitions.
   - **Settling Time Optimization**: Validates points using a 2000ms duration (allowing 1000ms settling time for natural saccadic latency, collecting frames in the remaining 1000ms).
 - **Calibrated Gaze HUD & Plots**: Updates the tracker window HUD labels dynamically (highlighting "Gaze X (cal)" and "Gaze Y (cal)" in blue) and streams calibrated values directly to the live scrolling chart and logs.
-- **Architecture Documentation (ADRs)**: Standardized architecture decision tracking (located in the [architecture_decisions/](file:///Users/asgidado/Documents/savi/architecture_decisions) directory) to record strategic milestones, such as chin-rest-free head-pose compensation.
 
 ---
 
@@ -105,9 +126,13 @@ pytest tests/ -v
   - `savi/preprocessor.py`: Blink interpolation, Savitzky-Golay smoothing, velocity estimation, and usability check.
   - `savi/detector.py`: I-VT saccade detection and validation logic.
   - `savi/protocol.py`: Headless trial state machine, block runner, and battery orchestrator.
+  - `savi/analyzer.py`: Clinical metric extraction engine.
+  - `savi/risk_engine.py`: Age-matched normative deviation scoring & risk band calculation.
+  - `savi/session_store.py`: JSON persistence for `SessionMetrics` and `RiskProfile`.
   - `savi/ui/`: PySide6 graphical user interfaces.
     - `savi/ui/tracker_window.py`: Visual telemetry board, scrolling trace, HUD indicators, and control buttons.
     - `savi/ui/calibration_window.py`: Borderless calibration and validation presenter.
+    - `savi/ui/stimulus_window.py`: High-precision visual stimulus presenter window.
     - `savi/ui/theme.py`: Modern dark-theme colors, fonts, and borders.
-- `tests/`: Automated unit tests verifying tracking math, blink detection, calibration regression, preprocessors, detectors, and protocols.
+- `tests/`: 51 automated unit tests verifying tracking math, blink detection, calibration regression, preprocessors, detectors, protocols, analyzers, risk engines, and session stores.
 - `architecture_decisions/`: Markdown files tracking architecture decisions and design proposals.
