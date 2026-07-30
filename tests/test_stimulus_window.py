@@ -106,3 +106,47 @@ def test_set_target_onset_overwrites_headless_timestamp():
 
     assert engine.t_target_onset == t_paint
     assert engine.t_target_onset > t_headless
+
+
+def test_fixation_indicator_state_evaluation():
+    """
+    Verify that _is_fixating flag is updated correctly when gaze frames
+    are evaluated against the fixation window.
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
+    from savi.ui.stimulus_window import StimulusWindow
+    from savi.tracker import GazeFrame
+
+    mock_tracker = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.viewing_distance_cm = 57.0
+
+    win = StimulusWindow(mock_tracker, mock_cal)
+
+    # Frame inside 2.5° window
+    frame_inside = GazeFrame(
+        timestamp=1.0, frame_idx=1,
+        gaze_x_deg=0.5, gaze_y_deg=-0.5,
+        left_iris_x=10.0, left_iris_y=10.0,
+        right_iris_x=20.0, right_iris_y=10.0,
+        velocity_deg_s=0.0, blink=False, confidence=0.9, fps_actual=30.0,
+        cal_x_deg=0.5, cal_y_deg=-0.5, calibration_applied=True
+    )
+    win._last_gaze_frame = frame_inside
+    win._sync_display_state()
+    assert win._is_fixating is True
+
+    # Frame outside 2.5° window
+    frame_outside = GazeFrame(
+        timestamp=1.1, frame_idx=2,
+        gaze_x_deg=4.0, gaze_y_deg=1.0,
+        left_iris_x=50.0, left_iris_y=50.0,
+        right_iris_x=60.0, right_iris_y=50.0,
+        velocity_deg_s=0.0, blink=False, confidence=0.9, fps_actual=30.0,
+        cal_x_deg=4.0, cal_y_deg=1.0, calibration_applied=True
+    )
+    win._last_gaze_frame = frame_outside
+    win._sync_display_state()
+    assert win._is_fixating is False
+
+

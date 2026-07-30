@@ -33,7 +33,7 @@ INSTRUCTIONS = {
             "Move your eyes to the dot as quickly as you can."
         ),
         "bullets": [
-            "Keep your eyes on the cross until the dot appears",
+            "Keep your eyes on the cross until it turns GREEN and the dot appears",
             "Move as quickly as possible when you see the dot",
         ]
     },
@@ -45,7 +45,7 @@ INSTRUCTIONS = {
             "keep looking at the center until the dot appears."
         ),
         "bullets": [
-            "The cross will disappear briefly — this is normal",
+            "The cross turns GREEN when fixated, then disappears briefly",
             "Look at the dot as soon as it appears",
         ]
     },
@@ -57,12 +57,13 @@ INSTRUCTIONS = {
             "If the dot is on the RIGHT, look LEFT."
         ),
         "bullets": [
-            "Look AWAY from the dot — to the mirror position",
+            "Fixate center cross until GREEN, then look AWAY to the opposite side",
             "If you look at the dot by mistake, correct yourself quickly",
             "This is harder — take a moment before starting",
         ]
     }
 }
+
 
 
 class StimulusWindow(QWidget):
@@ -118,6 +119,10 @@ class StimulusWindow(QWidget):
         self._show_target = False
         self._target_x = 0       # current target x in pixels
         self._onset_pending = False   # True: next paintEvent records onset
+        self._is_fixating = False     # True when gaze is within 2.5° fixation window
+        self._last_gaze_frame = None
+        self._current_trial_state = None
+
 
         # Session engine
         self._session = SessionRunner()
@@ -264,6 +269,7 @@ class StimulusWindow(QWidget):
             except queue.Empty:
                 break
 
+            self._last_gaze_frame = gaze_frame
             result = self._session.push_frame(gaze_frame)
 
             if result is not None:
@@ -305,14 +311,29 @@ class StimulusWindow(QWidget):
                         False at all other times.
         _target_x:      Set from spec.target_direction when entering TARGET_ON.
         """
-        try:
-            engine = self._session._current_runner._current_engine
-            if engine is None:
-                return
+        engine = getattr(getattr(self._session, "_current_runner", None), "_current_engine", None)
 
+        # Fixation status evaluation for UI feedback
+        if self._last_gaze_frame is not None:
+            if engine is not None:
+                self._is_fixating = engine._is_fixating(self._last_gaze_frame)
+            else:
+                f = self._last_gaze_frame
+                if f.blink or f.confidence < 0.5:
+                    self._is_fixating = False
+                else:
+                    gx = f.cal_x_deg if f.calibration_applied and f.cal_x_deg is not None else f.gaze_x_deg
+                    gy = f.cal_y_deg if f.calibration_applied and f.cal_y_deg is not None else f.gaze_y_deg
+                    self._is_fixating = (abs(gx) < FIXATION_WINDOW_DEG and abs(gy) < FIXATION_WINDOW_DEG)
+
+        if engine is None:
+            return
+
+        try:
             state = engine.state
             block_type = engine.spec.block_type
             direction = engine.spec.target_direction
+            self._current_trial_state = state
 
             # Fixation cross visibility
             if state in (TrialState.FIXATION_CHECK, TrialState.FIXATION_HOLD):
@@ -344,6 +365,8 @@ class StimulusWindow(QWidget):
 
         except AttributeError:
             pass
+
+
 
     def paintEvent(self, event):
         """
@@ -400,12 +423,59 @@ class StimulusWindow(QWidget):
                 logger.warning("Could not set target onset — engine not available.")
         # ────────────────────────────────────────────────────────────────
 
-        # Fixation cross
+        # Fixation cross & gaze fixation indicator
         if self._show_fixation:
             arm = self._fixation_arm_px
-            painter.setPen(QPen(FIXATION_COLOR, 2))
-            painter.drawLine(cx - arm, cy, cx + arm, cy)
-            painter.drawLine(cx, cy - arm, cx, cy + arm)
+            is_check_or_hold = (
+                getattr(self, "_current_trial_state", None) in (TrialState.FIXATION_CHECK, TrialState.FIXATION_HOLD)
+            )
+
+            if is_check_or_hold:
+                win_r = int(FIXATION_WINDOW_DEG * self._px_per_deg)
+                if self._is_fixating:
+                    # Gaze IS on the cross (Fixated)
+                    # Outer green glow ring around the 2.5° fixation window
+                    painter.setPen(QPen(QColor(0, 230, 118, 200), 2, Qt.SolidLine))
+                    painter.setBrush(QBrush(QColor(0, 230, 118, 30)))
+                    painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
+
+                    # Vibrant green fixation cross
+                    painter.setPen(QPen(QColor(0, 230, 118), 3))
+                    painter.drawLine(cx - arm, cy, cx + arm, cy)
+                    painter.drawLine(cx, cy - arm, cx, cy + arm)
+
+                    # Status label below the cross
+                    painter.setPen(QColor(0, 230, 118, 220))
+                    painter.setFont(QFont(FONTS["ui"], 12))
+                    painter.drawText(
+                        QRect(cx - 150, cy + win_r + 15, 300, 30),
+                        Qt.AlignCenter, "FIXATED — HOLD"
+                    )
+                else:
+                    # Gaze IS NOT on the cross (Adjustment needed)
+                    # Dashed amber boundary ring around 2.5° fixation window
+                    painter.setPen(QPen(QColor(255, 179, 0, 140), 1, Qt.DashLine))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
+
+                    # Standard white cross
+                    painter.setPen(QPen(FIXATION_COLOR, 2))
+                    painter.drawLine(cx - arm, cy, cx + arm, cy)
+                    painter.drawLine(cx, cy - arm, cx, cy + arm)
+
+                    # Prompt label below the cross
+                    painter.setPen(QColor(255, 179, 0, 200))
+                    painter.setFont(QFont(FONTS["ui"], 12))
+                    painter.drawText(
+                        QRect(cx - 150, cy + win_r + 15, 300, 30),
+                        Qt.AlignCenter, "Look at center cross"
+                    )
+            else:
+                # During TARGET_ON for Overlap and Antisaccade: clean white cross
+                painter.setPen(QPen(FIXATION_COLOR, 2))
+                painter.drawLine(cx - arm, cy, cx + arm, cy)
+                painter.drawLine(cx, cy - arm, cx, cy + arm)
+
 
         # Target dot
         if self._show_target:
