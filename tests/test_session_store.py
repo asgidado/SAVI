@@ -11,10 +11,16 @@ from savi.session_store import (
     save_session_metrics,
     load_session_metrics,
     save_risk_profile,
-    load_risk_profile
+    load_risk_profile,
+    save_raw_session,
+    load_raw_session
 )
 from savi.analyzer import SessionMetrics, ConditionMetrics
 from savi.risk_engine import RiskProfile, MetricFlag, RiskEngine
+from savi.protocol import BlockResult, TrialLog, TrialSpec, BlockType
+from savi.detector import DetectedSaccade
+from savi.preprocessor import GazeTrace
+from savi.tracker import GazeFrame
 
 
 def make_test_session_metrics():
@@ -91,3 +97,132 @@ def test_risk_profile_json_roundtrip(tmp_path):
 def test_load_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         load_session_metrics("non_existent_file.json")
+
+
+def test_raw_session_json_roundtrip(tmp_path):
+    spec = TrialSpec(
+        block_type=BlockType.OVERLAP,
+        trial_number=1,
+        block_number=1,
+        target_direction="right",
+        target_amplitude_deg=15.0,
+        gap_duration_ms=0.0,
+        iti_duration_ms=1000.0
+    )
+    frame = GazeFrame(
+        timestamp=1.0, frame_idx=1,
+        gaze_x_deg=0.5, gaze_y_deg=-0.5,
+        left_iris_x=10.0, left_iris_y=10.0,
+        right_iris_x=20.0, right_iris_y=10.0,
+        velocity_deg_s=0.0, blink=False, confidence=0.9, fps_actual=30.0,
+        cal_x_deg=0.5, cal_y_deg=-0.5, calibration_applied=True
+    )
+    trace = GazeTrace(
+        session_id="test",
+        trial_id=1,
+        timestamps_s=np.array([0.0, 0.033, 0.066]),
+        x_deg=np.array([0.0, 0.5, 1.0]),
+        y_deg=np.array([0.0, 0.0, 0.0]),
+        x_deg_smooth=np.array([0.0, 0.5, 1.0]),
+        y_deg_smooth=np.array([0.0, 0.0, 0.0]),
+        v_x=np.array([0.0, 15.0, 30.0]),
+        v_y=np.array([0.0, 0.0, 0.0]),
+        v_mag=np.array([0.0, 15.0, 30.0]),
+        blink_mask=np.array([False, False, False]),
+        fps=30.0,
+        n_blink_frames=0,
+        is_usable=True
+    )
+    saccade = DetectedSaccade(
+        onset_frame=1, offset_frame=2,
+        onset_timestamp_s=0.033, offset_timestamp_s=0.066,
+        latency_ms=200.0, duration_ms=33.0,
+        peak_velocity_dps=350.0, amplitude_deg=15.0,
+        direction="right", is_anticipatory=False,
+        is_valid=True, rejection_reason=""
+    )
+    trial = TrialLog(
+        spec=spec,
+        t_trial_start=0.0,
+        t_fixation_acquired=0.2,
+        t_target_onset=0.5,
+        t_trial_end=1.0,
+        frames=[frame],
+        n_frames=1,
+        trace=trace,
+        saccade=saccade,
+        is_usable=True,
+        aborted=False,
+        abort_reason="",
+        is_correct_antisaccade=None
+    )
+    block = BlockResult(
+        block_type=BlockType.OVERLAP,
+        block_number=1,
+        trials=[trial],
+        n_total=1,
+        n_usable=1,
+        n_aborted=0,
+        t_block_start=0.0,
+        t_block_end=1.0
+    )
+
+    path = save_raw_session([block], "session_raw_test", directory=str(tmp_path))
+    assert os.path.exists(path)
+
+    loaded = load_raw_session(path)
+    assert len(loaded) == 1
+    loaded_block = loaded[0]
+    assert loaded_block.block_type == BlockType.OVERLAP
+    assert len(loaded_block.trials) == 1
+
+    loaded_trial = loaded_block.trials[0]
+    assert loaded_trial.spec.target_direction == "right"
+    assert loaded_trial.saccade.latency_ms == 200.0
+    assert isinstance(loaded_trial.trace.x_deg_smooth, np.ndarray)
+    assert np.allclose(loaded_trial.trace.x_deg_smooth, trace.x_deg_smooth)
+    assert isinstance(loaded_trial.frames[0], GazeFrame)
+    assert loaded_trial.frames[0].timestamp == 1.0
+
+
+def test_raw_session_handles_none_trace_and_saccade(tmp_path):
+    spec = TrialSpec(
+        block_type=BlockType.OVERLAP,
+        trial_number=1,
+        block_number=1,
+        target_direction="right",
+        target_amplitude_deg=15.0,
+        gap_duration_ms=0.0,
+        iti_duration_ms=1000.0
+    )
+    trial_unusable = TrialLog(
+        spec=spec,
+        t_trial_start=0.0,
+        t_fixation_acquired=0.0,
+        t_target_onset=0.5,
+        t_trial_end=1.0,
+        frames=[],
+        n_frames=0,
+        trace=None,
+        saccade=None,
+        is_usable=False,
+        aborted=True,
+        abort_reason="FIXATION_LOST",
+        is_correct_antisaccade=None
+    )
+    block = BlockResult(
+        block_type=BlockType.OVERLAP,
+        block_number=1,
+        trials=[trial_unusable],
+        n_total=1,
+        n_usable=0,
+        n_aborted=1,
+        t_block_start=0.0,
+        t_block_end=1.0
+    )
+    path = save_raw_session([block], "session_unusable", directory=str(tmp_path))
+    loaded = load_raw_session(path)
+    assert loaded[0].trials[0].trace is None
+    assert loaded[0].trials[0].saccade is None
+    assert loaded[0].trials[0].is_usable is False
+

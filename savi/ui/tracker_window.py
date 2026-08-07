@@ -11,8 +11,9 @@ import collections
 from PySide6.QtCore import QTimer, Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QLabel, QPushButton, QVBoxLayout, QHBoxLayout,
-    QFrame, QGridLayout, QApplication
+    QFrame, QGridLayout, QApplication, QCheckBox
 )
+
 from PySide6.QtGui import QImage, QPixmap, QFont
 import pyqtgraph
 
@@ -246,7 +247,12 @@ class TrackerWindow(QMainWindow):
         self.btn_battery.setEnabled(False)   # disabled until calibration loaded
         self.buttons_layout.insertWidget(2, self.btn_battery)
         
+        self.chk_debug_mode = QCheckBox("Debug mode (fixation feedback)", self)
+        self.chk_debug_mode.setChecked(False)  # OFF by default — spec compliant
+        self.buttons_layout.insertWidget(3, self.chk_debug_mode)
+
         self.buttons_layout.addStretch()
+
         self.buttons_layout.addWidget(self.btn_quit)
         
         self.main_layout.addWidget(self.buttons_container)
@@ -495,23 +501,127 @@ class TrackerWindow(QMainWindow):
             logger.warning("Cannot run battery — no calibration loaded.")
             return
 
+        debug = self.chk_debug_mode.isChecked()
+        if debug:
+            logger.warning(
+                "Running battery with debug_mode=True — fixation feedback "
+                "is ON. This session deviates from the locked clinical "
+                "protocol spec and should NOT be used for data intended "
+                "for analysis, the phone validation rig, or the paper. "
+                "Use this only for pipeline/UI testing."
+            )
+
         from savi.ui.stimulus_window import StimulusWindow
-        self._stimulus_win = StimulusWindow(self.tracker, self._loaded_cal_map)
+        self._stimulus_win = StimulusWindow(
+            self.tracker, self._loaded_cal_map, debug_mode=debug
+        )
         self._stimulus_win.battery_complete.connect(self._on_battery_complete)
         screen = QApplication.primaryScreen()
         if screen:
             self._stimulus_win.setGeometry(screen.geometry())
         self._stimulus_win.show()
 
+
     def _on_battery_complete(self, block_results: list):
-        logger.info(
-            f"Battery complete. "
-            f"Blocks: {len(block_results)} | "
-            f"Total usable trials: "
-            f"{sum(r.n_usable for r in block_results)}"
-        )
-        # block_results stored for v0.2.0 metric extraction
+        """
+        Called when StimulusWindow finishes the full 3-block battery.
+
+        v0.2.0-patch: now automatically:
+          1. Saves the raw trial structure (never lose this again)
+          2. Runs the analyzer to produce SessionMetrics
+          3. Runs the risk engine (if participant age is known)
+          4. Saves SessionMetrics and RiskProfile
+          5. Runs drift detection on each block and logs the result
+        """
         self._last_battery_results = block_results
+
+        logger.info(
+            f"Battery complete. Blocks: {len(block_results)} | "
+            f"Total usable trials: {sum(r.n_usable for r in block_results)}"
+        )
+
+        import uuid
+        session_id = str(uuid.uuid4())[:8]
+
+        # 1. Save raw session — ALWAYS do this first, before anything
+        #    that could fail, so the data is never lost.
+        from savi.session_store import save_raw_session
+        try:
+            raw_path = save_raw_session(block_results, session_id)
+            logger.info(f"Raw session saved: {raw_path}")
+        except Exception as e:
+            logger.error(f"Failed to save raw session: {e}")
+            return  # Do not proceed to analysis if raw save failed
+
+        # 2. Prompt for participant age if not already known
+        #    (v0.2.0-patch: no UI field exists yet — use a simple
+        #    input dialog as a placeholder until v0.4.0 builds the
+        #    Setup screen properly)
+        from PySide6.QtWidgets import QInputDialog
+        age, ok = QInputDialog.getInt(
+            self, "Participant Age",
+            "Enter participant age for normative comparison:",
+            value=25, minValue=1, maxValue=120
+        )
+        if not ok:
+            logger.warning(
+                "No age provided — skipping metric analysis and risk scoring. "
+                "Raw session data is still saved and can be analyzed later."
+            )
+            return
+
+        # 3. Run analyzer
+        from savi.analyzer import Analyzer
+        analyzer = Analyzer()
+        try:
+            metrics = analyzer.analyze_session(block_results, session_id, participant_age=age)
+        except Exception as e:
+            logger.error(f"Analyzer failed: {e}")
+            return
+
+        # 4. Run drift detection per block — log results, do not block save
+        for br in block_results:
+            series = analyzer.extract_trial_order_series(br)
+            drift_result = analyzer.detect_drift(series)
+            logger.info(
+                f"Drift check [{br.block_type.value}]: "
+                f"slope={drift_result['slope']:.5f} "
+                f"n={drift_result['n_points']} "
+                f"flag={drift_result['flag']}"
+            )
+            if drift_result["flag"] == "drift_detected":
+                logger.warning(
+                    f"POSSIBLE CALIBRATION DRIFT in {br.block_type.value} block. "
+                    f"Gain slope {drift_result['slope']:.5f} per trial exceeds "
+                    f"threshold. Review trial-order plot before trusting "
+                    f"aggregate metrics from this session."
+                )
+
+        # 5. Run risk engine
+        from savi.risk_engine import RiskEngine
+        risk_engine = RiskEngine()
+        try:
+            risk_profile = risk_engine.compute_risk_profile(metrics, participant_age=age)
+        except Exception as e:
+            logger.error(f"Risk engine failed: {e}")
+            risk_profile = None
+
+        # 6. Save aggregated outputs
+        from savi.session_store import save_session_metrics, save_risk_profile
+        try:
+            metrics_path = save_session_metrics(metrics)
+            logger.info(f"Session metrics saved: {metrics_path}")
+        except Exception as e:
+            logger.error(f"Failed to save session metrics: {e}")
+
+        if risk_profile is not None:
+            try:
+                risk_path = save_risk_profile(risk_profile)
+                logger.info(f"Risk profile saved: {risk_path}")
+                logger.info(f"Risk band: {risk_profile.risk_band}")
+            except Exception as e:
+                logger.error(f"Failed to save risk profile: {e}")
+
 
     def closeEvent(self, event):
         """Ensures that the tracker background thread shuts down when closing."""

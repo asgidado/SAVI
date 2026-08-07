@@ -81,10 +81,12 @@ class StimulusWindow(QWidget):
     """
     battery_complete = Signal(list)
 
-    def __init__(self, tracker: GazeTracker, cal_map: CalibrationMap, parent=None):
+    def __init__(self, tracker: GazeTracker, cal_map: CalibrationMap, parent=None, debug_mode: bool = False):
         super().__init__(parent)
         self.tracker = tracker
         self.cal_map = cal_map
+        self.debug_mode = debug_mode
+
 
         # Dedicated frame queue — does not share tracker_window's queue
         self._queue = queue.Queue()
@@ -423,59 +425,20 @@ class StimulusWindow(QWidget):
                 logger.warning("Could not set target onset — engine not available.")
         # ────────────────────────────────────────────────────────────────
 
-        # Fixation cross & gaze fixation indicator
+        # Fixation cross — ALWAYS rendered per spec, all modes
         if self._show_fixation:
             arm = self._fixation_arm_px
-            is_check_or_hold = (
-                getattr(self, "_current_trial_state", None) in (TrialState.FIXATION_CHECK, TrialState.FIXATION_HOLD)
-            )
+            painter.setPen(QPen(FIXATION_COLOR, 2))
+            painter.drawLine(cx - arm, cy, cx + arm, cy)
+            painter.drawLine(cx, cy - arm, cx, cy + arm)
 
-            if is_check_or_hold:
-                win_r = int(FIXATION_WINDOW_DEG * self._px_per_deg)
-                if self._is_fixating:
-                    # Gaze IS on the cross (Fixated)
-                    # Outer green glow ring around the 2.5° fixation window
-                    painter.setPen(QPen(QColor(0, 230, 118, 200), 2, Qt.SolidLine))
-                    painter.setBrush(QBrush(QColor(0, 230, 118, 30)))
-                    painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
-
-                    # Vibrant green fixation cross
-                    painter.setPen(QPen(QColor(0, 230, 118), 3))
-                    painter.drawLine(cx - arm, cy, cx + arm, cy)
-                    painter.drawLine(cx, cy - arm, cx, cy + arm)
-
-                    # Status label below the cross
-                    painter.setPen(QColor(0, 230, 118, 220))
-                    painter.setFont(QFont(FONTS["ui"], 12))
-                    painter.drawText(
-                        QRect(cx - 150, cy + win_r + 15, 300, 30),
-                        Qt.AlignCenter, "FIXATED — HOLD"
-                    )
-                else:
-                    # Gaze IS NOT on the cross (Adjustment needed)
-                    # Dashed amber boundary ring around 2.5° fixation window
-                    painter.setPen(QPen(QColor(255, 179, 0, 140), 1, Qt.DashLine))
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
-
-                    # Standard white cross
-                    painter.setPen(QPen(FIXATION_COLOR, 2))
-                    painter.drawLine(cx - arm, cy, cx + arm, cy)
-                    painter.drawLine(cx, cy - arm, cx, cy + arm)
-
-                    # Prompt label below the cross
-                    painter.setPen(QColor(255, 179, 0, 200))
-                    painter.setFont(QFont(FONTS["ui"], 12))
-                    painter.drawText(
-                        QRect(cx - 150, cy + win_r + 15, 300, 30),
-                        Qt.AlignCenter, "Look at center cross"
-                    )
-            else:
-                # During TARGET_ON for Overlap and Antisaccade: clean white cross
-                painter.setPen(QPen(FIXATION_COLOR, 2))
-                painter.drawLine(cx - arm, cy, cx + arm, cy)
-                painter.drawLine(cx, cy - arm, cx, cy + arm)
-
+            # ── DEBUG-ONLY FIXATION FEEDBACK ─────────────────────────────
+            # Not part of the locked clinical protocol spec. Gated behind
+            # debug_mode so real data collection sessions match the spec's
+            # "fixation cross only" requirement for FIXATION_CHECK/HOLD.
+            if self.debug_mode:
+                self._paint_fixation_feedback(painter, cx, cy)
+            # ──────────────────────────────────────────────────────────────
 
         # Target dot
         if self._show_target:
@@ -483,6 +446,63 @@ class StimulusWindow(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QBrush(TARGET_COLOR))
             painter.drawEllipse(QPoint(self._target_x, cy), r, r)
+
+    def _paint_fixation_feedback(self, painter: QPainter, cx: int, cy: int):
+        """
+        DEBUG MODE ONLY. Renders real-time fixation status feedback:
+        dashed amber ring + "Look at center cross" when off-target,
+        glowing green ring + "FIXATED — HOLD" when within the fixation
+        window.
+
+        This exists purely to make manual testing legible — during
+        development it was unclear whether the system had detected
+        fixation or the hold timer had silently reset. It is NOT part
+        of the clinical protocol and must never render when debug_mode
+        is False.
+        """
+        is_check_or_hold = (
+            getattr(self, "_current_trial_state", None) in (TrialState.FIXATION_CHECK, TrialState.FIXATION_HOLD)
+        )
+        if not is_check_or_hold:
+            return
+
+        win_r = int(FIXATION_WINDOW_DEG * self._px_per_deg)
+        arm = self._fixation_arm_px
+
+        if self._is_fixating:
+            # Gaze IS on the cross (Fixated)
+            # Outer green glow ring around the 2.5° fixation window
+            painter.setPen(QPen(QColor(0, 230, 118, 200), 2, Qt.SolidLine))
+            painter.setBrush(QBrush(QColor(0, 230, 118, 30)))
+            painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
+
+            # Vibrant green fixation cross overlay
+            painter.setPen(QPen(QColor(0, 230, 118), 3))
+            painter.drawLine(cx - arm, cy, cx + arm, cy)
+            painter.drawLine(cx, cy - arm, cx, cy + arm)
+
+            # Status label below the cross
+            painter.setPen(QColor(0, 230, 118, 220))
+            painter.setFont(QFont(FONTS["ui"], 12))
+            painter.drawText(
+                QRect(cx - 150, cy + win_r + 15, 300, 30),
+                Qt.AlignCenter, "FIXATED — HOLD"
+            )
+        else:
+            # Gaze IS NOT on the cross (Adjustment needed)
+            # Dashed amber boundary ring around 2.5° fixation window
+            painter.setPen(QPen(QColor(255, 179, 0, 140), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(QPoint(cx, cy), win_r, win_r)
+
+            # Prompt label below the cross
+            painter.setPen(QColor(255, 179, 0, 200))
+            painter.setFont(QFont(FONTS["ui"], 12))
+            painter.drawText(
+                QRect(cx - 150, cy + win_r + 15, 300, 30),
+                Qt.AlignCenter, "Look at center cross"
+            )
+
 
     def _paint_instructions(self, painter: QPainter, W: int, H: int):
         """

@@ -150,3 +150,40 @@ def test_fixation_indicator_state_evaluation():
     assert win._is_fixating is False
 
 
+def test_debug_mode_defaults_to_false():
+    """
+    StimulusWindow constructed without debug_mode argument defaults
+    to spec-compliant behavior (no fixation feedback).
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
+    from savi.ui.stimulus_window import StimulusWindow
+
+    mock_tracker = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.viewing_distance_cm = 57.0
+    mock_cal.screen_width_px = 1920
+
+    win = StimulusWindow(mock_tracker, mock_cal)
+    assert win.debug_mode == False
+
+
+def test_debug_mode_explicit_true():
+    """
+    StimulusWindow constructed with debug_mode=True enables the flag.
+    Does not test actual rendering (requires paintEvent + offscreen
+    render inspection) — just confirms the flag is stored and would
+    gate correctly based on the paintEvent code structure.
+    """
+    app = QApplication.instance() or QApplication(sys.argv)
+    from savi.ui.stimulus_window import StimulusWindow
+
+    mock_tracker = MagicMock()
+    mock_cal = MagicMock()
+    mock_cal.viewing_distance_cm = 57.0
+    mock_cal.screen_width_px = 1920
+
+    win = StimulusWindow(mock_tracker, mock_cal, debug_mode=True)
+    assert win.debug_mode == True
+
+
+

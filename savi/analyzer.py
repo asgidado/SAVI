@@ -68,6 +68,22 @@ class SessionMetrics:
     timestamp_s: float
 
 
+@dataclass
+class TrialOrderSeries:
+    """
+    Per-trial metric values in trial order, for one condition.
+    Used to detect within-session drift (e.g. calibration degrading
+    over a long battery) by plotting these against trial_numbers.
+    """
+    condition_name: str
+    trial_numbers: list          # list[int], 1-indexed within block
+    latencies_ms: list           # list[float], NaN for invalid trials
+    peak_velocities_dps: list    # list[float], NaN for invalid trials
+    gains: list                  # list[float], NaN for invalid trials
+    is_valid: list                # list[bool] — was this trial usable+valid
+
+
+
 class Analyzer:
     """
     Extracts all clinical saccade metrics from a completed test battery.
@@ -354,3 +370,97 @@ class Analyzer:
         except RuntimeError:
             logger.error("Main sequence curve fit failed to converge.")
             return float('nan'), float('nan'), float('nan')
+
+    def extract_trial_order_series(self, block_result) -> TrialOrderSeries:
+        """
+        Extract per-trial metric values in trial order, without
+        aggregation. Used for drift detection: plot latencies_ms or
+        gains against trial_numbers and look for a slope. A flat
+        trend indicates calibration held steady across the session.
+        A visible upward slope in latency or downward slope in gain
+        suggests accuracy degraded over the battery — investigate
+        before trusting aggregate metrics from that session.
+
+        Includes ALL trials (not just valid ones) with NaN placeholders
+        for invalid/unusable trials, so the trial_numbers axis has no
+        gaps — gaps would visually hide a drift pattern.
+        """
+        trial_numbers = []
+        latencies = []
+        peak_velocities = []
+        gains = []
+        valid_flags = []
+
+        for t in block_result.trials:
+            trial_numbers.append(t.spec.trial_number)
+
+            is_valid_trial = (
+                t.is_usable and t.saccade is not None and t.saccade.is_valid
+            )
+            valid_flags.append(is_valid_trial)
+
+            if is_valid_trial:
+                latencies.append(t.saccade.latency_ms)
+                peak_velocities.append(t.saccade.peak_velocity_dps)
+                gain = self._compute_gain(
+                    t.saccade.amplitude_deg, t.spec.target_amplitude_deg
+                )
+                gains.append(gain)
+            else:
+                latencies.append(float('nan'))
+                peak_velocities.append(float('nan'))
+                gains.append(float('nan'))
+
+        return TrialOrderSeries(
+            condition_name=block_result.block_type.value,
+            trial_numbers=trial_numbers,
+            latencies_ms=latencies,
+            peak_velocities_dps=peak_velocities,
+            gains=gains,
+            is_valid=valid_flags
+        )
+
+    def detect_drift(self, series: TrialOrderSeries) -> dict:
+        """
+        Quick statistical check for a trend in gain across trial order
+        within a block. Uses simple linear regression (slope) on the
+        valid (non-NaN) gain values against trial number.
+
+        Returns:
+            {
+                "slope": float,       # gain change per trial
+                "n_points": int,      # number of valid points used
+                "flag": str           # "stable" | "drift_detected" | "insufficient_data"
+            }
+
+        This is a coarse screening check, not a formal statistical test.
+        A |slope| > 0.005 per trial over a 20-trial block corresponds to
+        a ~10% gain shift across the block — flagged as drift_detected.
+        Adjust this threshold empirically once you have real session data.
+        """
+        valid_pairs = [
+            (tn, g) for tn, g, ok in zip(
+                series.trial_numbers, series.gains, series.is_valid
+            ) if ok and not np.isnan(g)
+        ]
+
+        if len(valid_pairs) < 5:
+            return {"slope": float('nan'), "n_points": len(valid_pairs),
+                    "flag": "insufficient_data"}
+
+        trial_nums = np.array([p[0] for p in valid_pairs])
+        gain_vals = np.array([p[1] for p in valid_pairs])
+
+        # Simple linear fit: gain = slope * trial_number + intercept
+        slope, intercept = np.polyfit(trial_nums, gain_vals, 1)
+
+        DRIFT_SLOPE_THRESHOLD = 0.005  # gain units per trial — empirical, tune later
+
+        flag = "drift_detected" if abs(slope) > DRIFT_SLOPE_THRESHOLD else "stable"
+
+        return {
+            "slope": float(slope),
+            "n_points": len(valid_pairs),
+            "flag": flag
+        }
+

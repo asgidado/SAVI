@@ -258,3 +258,46 @@ def test_main_sequence_fit_insufficient_data():
     assert np.isnan(v_max)
     assert np.isnan(a0)
     assert np.isnan(r2)
+
+
+def test_extract_trial_order_series_preserves_trial_count():
+    """
+    Construct a BlockResult with 10 trials, 3 of which are invalid
+    (no saccade detected). Call extract_trial_order_series().
+    Assert:
+      - len(series.trial_numbers) == 10 (all trials included, no gaps)
+      - the 3 invalid trials have NaN in latencies_ms/gains
+      - is_valid correctly flags the 7 valid trials as True
+    """
+    analyzer = Analyzer()
+    trials = []
+    for i in range(1, 11):
+        is_valid = (i not in (3, 6, 9))
+        trials.append(make_mock_trial(trial_number=i, is_valid=is_valid))
+
+    block = BlockResult(
+        block_type=BlockType.OVERLAP,
+        block_number=1,
+        trials=trials,
+        n_total=10,
+        n_usable=7,
+        n_aborted=0,
+        t_block_start=0.0,
+        t_block_end=1.0
+    )
+
+    series = analyzer.extract_trial_order_series(block)
+    assert len(series.trial_numbers) == 10
+    assert series.trial_numbers == list(range(1, 11))
+
+    # Check 7 valid, 3 invalid
+    assert sum(series.is_valid) == 7
+
+    for idx, is_val in enumerate(series.is_valid):
+        if is_val:
+            assert not np.isnan(series.latencies_ms[idx])
+            assert not np.isnan(series.gains[idx])
+        else:
+            assert np.isnan(series.latencies_ms[idx])
+            assert np.isnan(series.gains[idx])
+
