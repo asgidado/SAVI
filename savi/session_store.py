@@ -8,8 +8,21 @@ import json
 import dataclasses
 import os
 import time
+import numpy as np
 from savi.analyzer import SessionMetrics, ConditionMetrics
 from savi.risk_engine import RiskProfile, MetricFlag
+
+
+def _json_default(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def save_session_metrics(metrics: SessionMetrics, directory: str = "data") -> str:
@@ -22,7 +35,7 @@ def save_session_metrics(metrics: SessionMetrics, directory: str = "data") -> st
     filename = f"session_metrics_{metrics.session_id}_{timestamp_str}.json"
     path = os.path.join(directory, filename)
     with open(path, 'w') as f:
-        json.dump(dataclasses.asdict(metrics), f, indent=2)
+        json.dump(dataclasses.asdict(metrics), f, indent=2, default=_json_default)
     return path
 
 
@@ -46,7 +59,7 @@ def save_risk_profile(profile: RiskProfile, directory: str = "data") -> str:
     filename = f"risk_profile_{profile.session_id}_{timestamp_str}.json"
     path = os.path.join(directory, filename)
     with open(path, 'w') as f:
-        json.dump(dataclasses.asdict(profile), f, indent=2)
+        json.dump(dataclasses.asdict(profile), f, indent=2, default=_json_default)
     return path
 
 
@@ -147,12 +160,13 @@ def save_raw_session(
     }
 
     with open(path, 'w') as f:
-        json.dump(payload, f, indent=2)
+        json.dump(payload, f, indent=2, default=_json_default)
 
     return path
 
 
 def load_raw_session(path: str):
+
     """
     Reconstruct list[BlockResult] from a saved raw session JSON file.
 

@@ -134,13 +134,14 @@ def test_raw_session_json_roundtrip(tmp_path):
         is_usable=True
     )
     saccade = DetectedSaccade(
-        onset_frame=1, offset_frame=2,
-        onset_timestamp_s=0.033, offset_timestamp_s=0.066,
-        latency_ms=200.0, duration_ms=33.0,
-        peak_velocity_dps=350.0, amplitude_deg=15.0,
-        direction="right", is_anticipatory=False,
-        is_valid=True, rejection_reason=""
+        onset_frame=np.int64(1), offset_frame=np.int64(2),
+        onset_timestamp_s=np.float64(0.033), offset_timestamp_s=np.float64(0.066),
+        latency_ms=np.float64(200.0), duration_ms=np.float64(33.0),
+        peak_velocity_dps=np.float64(350.0), amplitude_deg=np.float64(15.0),
+        direction="right", is_anticipatory=np.bool_(False),
+        is_valid=np.bool_(True), rejection_reason=""
     )
+
     trial = TrialLog(
         spec=spec,
         t_trial_start=0.0,
